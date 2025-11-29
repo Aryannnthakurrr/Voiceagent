@@ -248,8 +248,7 @@ SECOND_OPINION_SERVICE = {
     "description": """
 Delhi Hospital offers a FREE Second Opinion Service. Start online by uploading 
 your reports, and get a FREE in-person appointment at the hospital. Senior 
-specialists review your case and guide you on whether surgery or treatment is 
-actually needed. No charges at any step.
+specialists review your case and guide you on best course of action regarding surgery or treatment. No charges at any step.
 """.strip(),
     
     "how_it_works": [
@@ -265,15 +264,15 @@ actually needed. No charges at any step.
         "Start from home - just upload reports online",
         "Expert review by senior specialists",
         "Get FREE in-person consultation at hospital",
-        "Avoid unnecessary surgeries - get honest opinion",
+        "Get honest opinion regarding best course of action",
         "No obligation - decide after meeting the doctor"
     ],
     
     "who_should_use": [
+        "Anyone wanting expert opinion before starting treatment"
+        "Cases with confusing or conflicting reports",
         "Patients advised for surgery who want confirmation",
         "People with joint, spine, or arthritis issues",
-        "Cases with confusing or conflicting reports",
-        "Anyone wanting expert opinion before starting treatment"
     ],
     
     "documents_needed": {
