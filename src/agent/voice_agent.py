@@ -217,6 +217,11 @@ class RealtimeVoiceAgent:
         self.cost_tracker = init_tracker(verbose=verbose)
         self.turn_start_time = None  # Track audio duration
         self.audio_output_chars = 0  # Estimate output duration from text length
+        
+        # Echo/interrupt protection - prevent AI audio from triggering VAD
+        self.ai_speaking = False
+        self.ai_speech_end_time = 0
+        self.ECHO_COOLDOWN = 0.8  # Seconds to wait after AI stops before accepting interrupts
     
     async def summarize_conversation(self):
         """
@@ -364,9 +369,9 @@ class RealtimeVoiceAgent:
                     # Removed input_audio_transcription to save Whisper tokens!
                     "turn_detection": {
                         "type": "server_vad",
-                        "threshold": 0.3,  # Lower = more sensitive to user speech
-                        "prefix_padding_ms": 200,
-                        "silence_duration_ms": 400,
+                        "threshold": 0.6,  # Higher = less sensitive (prevents echo/noise triggers)
+                        "prefix_padding_ms": 300,
+                        "silence_duration_ms": 700,  # Longer pause needed to end speech
                         "create_response": True,
                         "interrupt_response": True  # Enable barge-in / interruption
                     }
@@ -380,11 +385,21 @@ class RealtimeVoiceAgent:
                 acc_items: dict[str, Any] = {}
                 
                 async for event in conn:
-                    # Handle user interruption - stop current response IMMEDIATELY
+                    # Handle user interruption - but with echo protection
                     if event.type == "input_audio_buffer.speech_started":
-                        # User started speaking - cancel current response
-                        # This marks the response as cancelled so remaining audio won't play
+                        # Check if this might be echo from AI audio
+                        current_time = time.time()
+                        time_since_ai_stopped = current_time - self.ai_speech_end_time
+                        
+                        # If AI was just speaking, ignore this (probably echo)
+                        if self.ai_speaking or time_since_ai_stopped < self.ECHO_COOLDOWN:
+                            if self.verbose:
+                                print(f"[ECHO] Ignored speech detection (AI active or cooldown)", end="\r")
+                            continue
+                        
+                        # Real user interruption - cancel current response
                         self.audio_player.cancel_current()
+                        self.ai_speaking = False
                         try:
                             await conn.response.cancel()
                         except:
@@ -395,6 +410,8 @@ class RealtimeVoiceAgent:
                     # Response was cancelled (interrupted) - ensure audio stops
                     if event.type == "response.cancelled":
                         self.audio_player.cancel_current()
+                        self.ai_speaking = False
+                        self.ai_speech_end_time = time.time()
                         continue
                     
                     # Session events
@@ -415,8 +432,9 @@ class RealtimeVoiceAgent:
                         print("="*50 + "\n")
                         continue
                     
-                    # Audio output from AI - queue for playback
+                    # Audio output from AI - queue for playback and mark AI as speaking
                     if event.type in ("response.audio.delta", "response.output_audio.delta"):
+                        self.ai_speaking = True
                         audio_bytes = base64.b64decode(event.delta)
                         self.audio_player.play(audio_bytes)
                         continue
@@ -434,6 +452,10 @@ class RealtimeVoiceAgent:
                         continue
                     
                     if event.type in ("response.audio_transcript.done", "response.output_audio_transcript.done"):
+                        # AI finished speaking - mark end time for echo protection
+                        self.ai_speaking = False
+                        self.ai_speech_end_time = time.time()
+                        
                         # Print the complete transcript once at the end
                         try:
                             item_id = getattr(event, 'item_id', 'default')
@@ -472,6 +494,9 @@ class RealtimeVoiceAgent:
                     
                     # Response completed - good place to check history size
                     if event.type == "response.done":
+                        # Mark AI as done speaking (backup in case transcript.done doesn't fire)
+                        self.ai_speaking = False
+                        self.ai_speech_end_time = time.time()
                         # Truncate if conversation is getting too long
                         await self.truncate_old_items()
                         continue
