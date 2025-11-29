@@ -1,0 +1,17 @@
+[tool.poetry]
+name = "hospital-voice-agent"
+version = "0.1.0"
+description = "A real-time AI voice agent for hospital patient queries."
+authors = ["Your Name <youremail@example.com>"]
+license = "MIT"
+
+[tool.poetry.dependencies]
+python = "^3.8"
+speechrecognition = "^3.8.1"
+gTTS = "^2.2.3"
+pydub = "^0.25.1"
+flask = "^2.0.1"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
