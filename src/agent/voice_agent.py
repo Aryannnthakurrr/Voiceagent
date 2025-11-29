@@ -44,10 +44,14 @@ except ImportError:
     sys.exit(1)
 
 
+import platform
+
+
 class AudioPlayer:
     """
     Threaded audio player with instant interrupt capability.
     Uses a queue that can be cleared immediately when user speaks.
+    Cross-platform compatible (Windows, Mac, Linux).
     """
     
     def __init__(self, sample_rate=24000, verbose=False):
@@ -58,42 +62,74 @@ class AudioPlayer:
         self.interrupt_flag = threading.Event()
         self.thread = None
         self.stream = None
+        self.is_mac = platform.system() == "Darwin"
         
     def _player_thread(self):
         """Background thread that plays audio from queue"""
+        # Mac needs larger buffer to avoid stuttering
+        blocksize = 4800 if self.is_mac else 256
+        
         self.stream = sd.OutputStream(
             samplerate=self.sample_rate,
             channels=1,
             dtype=np.int16,
-            blocksize=256,  # Very small for quick response
+            blocksize=blocksize,
+            latency='low' if not self.is_mac else 'high',
         )
         self.stream.start()
+        
+        # Buffer to accumulate audio for smoother playback on Mac
+        audio_buffer = []
+        min_buffer_size = 4800 if self.is_mac else 0  # ~200ms buffer on Mac
         
         while not self.stop_flag.is_set():
             try:
                 # Get audio with timeout so we can check flags
-                audio_data = self.audio_queue.get(timeout=0.05)
+                audio_data = self.audio_queue.get(timeout=0.1)
                 
                 # Check if interrupted before playing
                 if self.interrupt_flag.is_set():
-                    continue  # Discard this audio
+                    audio_buffer = []  # Clear buffer on interrupt
+                    continue
+                
+                if self.is_mac:
+                    # Accumulate audio in buffer for smoother playback
+                    audio_buffer.append(audio_data)
+                    total_samples = sum(len(a) for a in audio_buffer)
                     
-                # Play in small chunks so we can interrupt mid-playback
-                chunk_size = 1200  # ~50ms at 24kHz
-                for i in range(0, len(audio_data), chunk_size):
-                    if self.interrupt_flag.is_set():
-                        break  # Stop mid-chunk if interrupted
-                    chunk = audio_data[i:i+chunk_size]
-                    self.stream.write(chunk)
+                    # Play when buffer is large enough
+                    if total_samples >= min_buffer_size:
+                        combined = np.concatenate(audio_buffer)
+                        audio_buffer = []
+                        
+                        if not self.interrupt_flag.is_set():
+                            self.stream.write(combined)
+                else:
+                    # Windows/Linux: play in small chunks for quick interrupt
+                    chunk_size = 1200  # ~50ms at 24kHz
+                    for i in range(0, len(audio_data), chunk_size):
+                        if self.interrupt_flag.is_set():
+                            break
+                        chunk = audio_data[i:i+chunk_size]
+                        self.stream.write(chunk)
                     
             except queue.Empty:
+                # On Mac, flush any remaining buffer during silence
+                if self.is_mac and audio_buffer and not self.interrupt_flag.is_set():
+                    combined = np.concatenate(audio_buffer)
+                    audio_buffer = []
+                    self.stream.write(combined)
                 continue
             except Exception as e:
-                pass
+                if self.verbose:
+                    print(f"[AUDIO] Playback error: {e}")
                 
         if self.stream:
-            self.stream.stop()
-            self.stream.close()
+            try:
+                self.stream.stop()
+                self.stream.close()
+            except:
+                pass
         
     def start(self):
         """Start the audio player thread"""
@@ -102,7 +138,8 @@ class AudioPlayer:
         self.thread = threading.Thread(target=self._player_thread, daemon=True)
         self.thread.start()
         if self.verbose:
-            print("[AUDIO] Output initialized")
+            platform_name = "Mac" if self.is_mac else platform.system()
+            print(f"[AUDIO] Output initialized ({platform_name})")
         
     def play(self, audio_bytes: bytes, response_id: str = None):
         """Queue audio for playback"""
@@ -110,9 +147,11 @@ class AudioPlayer:
             return  # Don't queue if interrupted
         try:
             audio_array = np.frombuffer(audio_bytes, dtype=np.int16)
-            self.audio_queue.put(audio_array)
-        except:
-            pass
+            if len(audio_array) > 0:  # Only queue non-empty audio
+                self.audio_queue.put(audio_array)
+        except Exception as e:
+            if self.verbose:
+                print(f"[AUDIO] Queue error: {e}")
     
     def cancel_current(self):
         """INSTANTLY stop all audio and clear queue"""
