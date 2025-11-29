@@ -36,6 +36,9 @@ from agent.tools import TOOLS, handle_tool_call
 # Import cost tracker
 from utils.cost_tracker import init_tracker, get_tracker
 
+# Import echo cancellation for Mac
+from utils.echo_canceller import EchoCanceller, SimpleEchoGate
+
 try:
     from openai import AsyncOpenAI
     from openai.resources.beta.realtime.realtime import AsyncRealtimeConnection
@@ -52,9 +55,10 @@ class AudioPlayer:
     Threaded audio player with instant interrupt capability.
     Uses a queue that can be cleared immediately when user speaks.
     Cross-platform compatible (Windows, Mac, Linux).
+    Integrates with EchoCanceller to prevent self-triggering on Mac.
     """
     
-    def __init__(self, sample_rate=24000, verbose=False):
+    def __init__(self, sample_rate=24000, verbose=False, echo_canceller=None):
         self.sample_rate = sample_rate
         self.verbose = verbose
         self.audio_queue = queue.Queue()
@@ -63,6 +67,8 @@ class AudioPlayer:
         self.thread = None
         self.stream = None
         self.is_mac = platform.system() == "Darwin"
+        self.echo_canceller = echo_canceller  # For tracking what we're playing
+        self.is_playing = False
         
     def _player_thread(self):
         """Background thread that plays audio from queue"""
@@ -90,7 +96,10 @@ class AudioPlayer:
                 # Check if interrupted before playing
                 if self.interrupt_flag.is_set():
                     audio_buffer = []  # Clear buffer on interrupt
+                    self.is_playing = False
                     continue
+                
+                self.is_playing = True
                 
                 if self.is_mac:
                     # Accumulate audio in buffer for smoother playback
@@ -103,6 +112,9 @@ class AudioPlayer:
                         audio_buffer = []
                         
                         if not self.interrupt_flag.is_set():
+                            # Track for echo cancellation
+                            if self.echo_canceller:
+                                self.echo_canceller.add_speaker_audio(combined)
                             self.stream.write(combined)
                 else:
                     # Windows/Linux: play in small chunks for quick interrupt
@@ -111,6 +123,9 @@ class AudioPlayer:
                         if self.interrupt_flag.is_set():
                             break
                         chunk = audio_data[i:i+chunk_size]
+                        # Track for echo cancellation
+                        if self.echo_canceller:
+                            self.echo_canceller.add_speaker_audio(chunk)
                         self.stream.write(chunk)
                     
             except queue.Empty:
@@ -118,7 +133,10 @@ class AudioPlayer:
                 if self.is_mac and audio_buffer and not self.interrupt_flag.is_set():
                     combined = np.concatenate(audio_buffer)
                     audio_buffer = []
+                    if self.echo_canceller:
+                        self.echo_canceller.add_speaker_audio(combined)
                     self.stream.write(combined)
+                self.is_playing = False
                 continue
             except Exception as e:
                 if self.verbose:
@@ -194,6 +212,7 @@ class RealtimeVoiceAgent:
     
     Includes conversation history management to control costs.
     Includes COST TRACKING for all API usage.
+    Includes SOFTWARE ECHO CANCELLATION for Mac compatibility.
     """
     
     # Configuration for conversation history
@@ -202,7 +221,14 @@ class RealtimeVoiceAgent:
     def __init__(self, verbose: bool = False):
         self.verbose = verbose
         self.client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-        self.audio_player = AudioPlayer(SAMPLE_RATE, verbose=verbose)
+        self.is_mac = platform.system() == "Darwin"
+        
+        # Echo cancellation for Mac (prevents AI audio from triggering VAD)
+        self.echo_canceller = EchoCanceller(SAMPLE_RATE) if self.is_mac else None
+        
+        # Audio player with echo canceller integration
+        self.audio_player = AudioPlayer(SAMPLE_RATE, verbose=verbose, echo_canceller=self.echo_canceller)
+        
         self.connection: AsyncRealtimeConnection | None = None
         self.should_send_audio = asyncio.Event()
         self.connected = asyncio.Event()
@@ -221,7 +247,16 @@ class RealtimeVoiceAgent:
         # Echo/interrupt protection - prevent AI audio from triggering VAD
         self.ai_speaking = False
         self.ai_speech_end_time = 0
-        self.ECHO_COOLDOWN = 0.8  # Seconds to wait after AI stops before accepting interrupts
+        self.ECHO_COOLDOWN = 1.0  # Seconds to wait after AI stops before accepting interrupts
+        
+        # Mac-specific startup message
+        if self.is_mac:
+            print("\n" + "=" * 60)
+            print("MAC DETECTED - For best experience:")
+            print("  • Use headphones to prevent echo feedback")
+            print("  • Or keep speaker volume moderate")
+            print("  • High VAD threshold active (speak clearly)")
+            print("=" * 60 + "\n")
     
     async def summarize_conversation(self):
         """
@@ -339,7 +374,9 @@ class RealtimeVoiceAgent:
                 await self.connected.wait()
                 
                 if self.connection:
-                    # Send audio to the API
+                    # ALWAYS send audio to API - let server VAD handle detection
+                    # Don't block audio even if echo canceller thinks it's echo
+                    # The server is better at detecting real speech
                     audio_b64 = base64.b64encode(data.tobytes()).decode('utf-8')
                     await self.connection.input_audio_buffer.append(audio=audio_b64)
                     
@@ -369,9 +406,9 @@ class RealtimeVoiceAgent:
                     # Removed input_audio_transcription to save Whisper tokens!
                     "turn_detection": {
                         "type": "server_vad",
-                        "threshold": 0.6,  # Higher = less sensitive (prevents echo/noise triggers)
+                        "threshold": 0.8,  # Very high threshold - only trigger on clear speech
                         "prefix_padding_ms": 300,
-                        "silence_duration_ms": 700,  # Longer pause needed to end speech
+                        "silence_duration_ms": 800,  # Longer pause needed to end speech
                         "create_response": True,
                         "interrupt_response": True  # Enable barge-in / interruption
                     }
@@ -381,21 +418,18 @@ class RealtimeVoiceAgent:
                 if self.verbose:
                     print("[INFO] Voice: Coral (Natural Female) | Language: Hinglish")
                     print("[INFO] Tools: 7 functions for hospital data retrieval")
+                    if self.is_mac:
+                        print("[INFO] Mac detected - Software Echo Cancellation enabled")
+                        print("[TIP] For best results, use headphones to prevent echo")
                 
                 acc_items: dict[str, Any] = {}
                 
                 async for event in conn:
-                    # Handle user interruption - but with echo protection
+                    # Handle user interruption (barge-in)
                     if event.type == "input_audio_buffer.speech_started":
-                        # Check if this might be echo from AI audio
-                        current_time = time.time()
-                        time_since_ai_stopped = current_time - self.ai_speech_end_time
-                        
-                        # If AI was just speaking, ignore this (probably echo)
-                        if self.ai_speaking or time_since_ai_stopped < self.ECHO_COOLDOWN:
-                            if self.verbose:
-                                print(f"[ECHO] Ignored speech detection (AI active or cooldown)", end="\r")
-                            continue
+                        # On Mac without headphones, this might trigger from echo
+                        # But we MUST allow it for barge-in to work
+                        # Trade-off: Some false triggers vs no barge-in capability
                         
                         # Real user interruption - cancel current response
                         self.audio_player.cancel_current()
@@ -455,6 +489,10 @@ class RealtimeVoiceAgent:
                         # AI finished speaking - mark end time for echo protection
                         self.ai_speaking = False
                         self.ai_speech_end_time = time.time()
+                        
+                        # Also notify echo canceller
+                        if self.echo_canceller:
+                            self.echo_canceller.mark_playback_stopped()
                         
                         # Print the complete transcript once at the end
                         try:
