@@ -1,14 +1,18 @@
 """
 Real-time Voice Agent using OpenAI's Realtime API
 Handles live audio conversation for hospital inquiries
+Now with TOOLS for cost-efficient data retrieval!
+Includes COST TRACKING for all API usage.
 """
 
 import asyncio
 import base64
+import json
 import os
 import sys
 import threading
 import queue
+import time
 from typing import Any
 
 import numpy as np
@@ -26,6 +30,12 @@ from config.settings import (
     HOSPITAL_NAME
 )
 
+# Import tools for function calling
+from agent.tools import TOOLS, handle_tool_call
+
+# Import cost tracker
+from utils.cost_tracker import init_tracker, get_tracker
+
 try:
     from openai import AsyncOpenAI
     from openai.resources.beta.realtime.realtime import AsyncRealtimeConnection
@@ -40,8 +50,9 @@ class AudioPlayer:
     Uses a queue that can be cleared immediately when user speaks.
     """
     
-    def __init__(self, sample_rate=24000):
+    def __init__(self, sample_rate=24000, verbose=False):
         self.sample_rate = sample_rate
+        self.verbose = verbose
         self.audio_queue = queue.Queue()
         self.stop_flag = threading.Event()
         self.interrupt_flag = threading.Event()
@@ -90,7 +101,8 @@ class AudioPlayer:
         self.interrupt_flag.clear()
         self.thread = threading.Thread(target=self._player_thread, daemon=True)
         self.thread.start()
-        print("🔊 Audio output initialized")
+        if self.verbose:
+            print("[AUDIO] Output initialized")
         
     def play(self, audio_bytes: bytes, response_id: str = None):
         """Queue audio for playback"""
@@ -140,15 +152,113 @@ class RealtimeVoiceAgent:
     """
     A real-time voice agent that uses OpenAI's Realtime API
     for live speech-to-speech conversation.
+    
+    Includes conversation history management to control costs.
+    Includes COST TRACKING for all API usage.
     """
     
-    def __init__(self):
+    # Configuration for conversation history
+    MAX_TURNS_BEFORE_SUMMARY = 4  # Summarize after this many exchanges
+    
+    def __init__(self, verbose: bool = False):
+        self.verbose = verbose
         self.client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-        self.audio_player = AudioPlayer(SAMPLE_RATE)
+        self.audio_player = AudioPlayer(SAMPLE_RATE, verbose=verbose)
         self.connection: AsyncRealtimeConnection | None = None
         self.should_send_audio = asyncio.Event()
         self.connected = asyncio.Event()
         self.last_audio_item_id = None
+        
+        # Conversation tracking for summarization
+        self.turn_count = 0
+        self.conversation_summary = ""  # Compressed history
+        self.recent_exchanges = []  # Last few exchanges (text only)
+        
+        # Cost tracking
+        self.cost_tracker = init_tracker(verbose=verbose)
+        self.turn_start_time = None  # Track audio duration
+        self.audio_output_chars = 0  # Estimate output duration from text length
+    
+    async def summarize_conversation(self):
+        """
+        Use GPT-4o-mini to summarize conversation history cheaply.
+        This compresses old context to save tokens.
+        """
+        if not self.recent_exchanges:
+            return
+        
+        # Build text of recent exchanges
+        exchanges_text = "\n".join([
+            f"User: {ex.get('user', 'unknown')}\nAssistant: {ex.get('assistant', 'unknown')}"
+            for ex in self.recent_exchanges
+        ])
+        
+        try:
+            # Use GPT-4o-mini for cheap summarization
+            response = await self.client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "Summarize this hospital reception conversation in 2-3 sentences. Focus on: patient's issue, any doctor/department mentioned, and what was resolved or pending. Be concise."
+                    },
+                    {
+                        "role": "user", 
+                        "content": f"Previous summary: {self.conversation_summary or 'None'}\n\nNew exchanges:\n{exchanges_text}"
+                    }
+                ],
+                max_tokens=150
+            )
+            
+            # Log cost for summarization
+            usage = response.usage
+            if usage:
+                self.cost_tracker.log_chat_completion(
+                    model="gpt-4o-mini",
+                    input_tokens=usage.prompt_tokens,
+                    output_tokens=usage.completion_tokens,
+                    purpose="conversation_summary"
+                )
+            
+            self.conversation_summary = response.choices[0].message.content
+            self.recent_exchanges = []  # Clear after summarizing
+            if self.verbose:
+                print(f"[INFO] History compressed")
+            
+        except Exception as e:
+            if self.verbose:
+                print(f"[WARN] Summary failed: {e}")
+    
+    async def inject_summary_context(self):
+        """Inject the conversation summary into the session if we have one."""
+        if self.conversation_summary and self.connection:
+            try:
+                # Add summary as a system message in conversation
+                await self.connection.conversation.item.create(
+                    item={
+                        "type": "message",
+                        "role": "system",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": f"[Previous conversation summary: {self.conversation_summary}]"
+                            }
+                        ]
+                    }
+                )
+            except Exception as e:
+                pass  # Non-critical
+    
+    async def truncate_old_items(self):
+        """Remove old conversation items to prevent context from growing too large."""
+        # The Realtime API doesn't have a direct "list items" method,
+        # so we track turn count and reset session periodically
+        if self.turn_count >= self.MAX_TURNS_BEFORE_SUMMARY * 2:
+            if self.verbose:
+                print("[INFO] Resetting session to manage costs...")
+            # Summarize before reset
+            await self.summarize_conversation()
+            self.turn_count = 0
         
     async def send_mic_audio(self):
         """Continuously capture and send audio from microphone"""
@@ -177,8 +287,8 @@ class RealtimeVoiceAgent:
                 audio_level_counter += 1
                 if audio_level_counter >= 50:  # Every 50 * 20ms = 1 second
                     level = np.abs(data).mean()
-                    if level > 100:  # Only show if there's actual sound
-                        print(f"🔊 Audio level: {int(level)}", end="\r")
+                    if self.verbose and level > 100:  # Only show if verbose and actual sound
+                        print(f"[MIC] Level: {int(level)}", end="\r")
                     audio_level_counter = 0
                 
                 # Wait for connection
@@ -204,15 +314,15 @@ class RealtimeVoiceAgent:
                 self.connection = conn
                 self.connected.set()
                 
-                # Configure session with voice and interrupt support
+                # Configure session with voice, tools, and interrupt support
                 # Best voices for natural sound: coral, verse, marin, cedar
                 await conn.session.update(session={
                     "modalities": ["text", "audio"],
                     "voice": "coral",  # Warm, friendly, natural female voice
                     "instructions": SYSTEM_INSTRUCTIONS,
-                    "input_audio_transcription": {
-                        "model": "whisper-1"
-                    },
+                    "tools": TOOLS,  # Register tools for function calling
+                    "tool_choice": "auto",  # Let model decide when to use tools
+                    # Removed input_audio_transcription to save Whisper tokens!
                     "turn_detection": {
                         "type": "server_vad",
                         "threshold": 0.3,  # Lower = more sensitive to user speech
@@ -223,8 +333,10 @@ class RealtimeVoiceAgent:
                     }
                 })
                 
-                print("✅ Connected to OpenAI Realtime API")
-                print("🗣️  Voice: Coral (Natural Female) | Language: Hinglish")
+                print("[OK] Connected to OpenAI Realtime API")
+                if self.verbose:
+                    print("[INFO] Voice: Coral (Natural Female) | Language: Hinglish")
+                    print("[INFO] Tools: 7 functions for hospital data retrieval")
                 
                 acc_items: dict[str, Any] = {}
                 
@@ -238,7 +350,7 @@ class RealtimeVoiceAgent:
                             await conn.response.cancel()
                         except:
                             pass  # No active response to cancel
-                        print("\n🔇 [Interrupted] 🎤 Listening...", end="\r")
+                        print("\n[Interrupted] Listening...", end="\r")
                         continue
                     
                     # Response was cancelled (interrupted) - ensure audio stops
@@ -248,14 +360,19 @@ class RealtimeVoiceAgent:
                     
                     # Session events
                     if event.type == "session.created":
-                        print("📡 Session established")
+                        if self.verbose:
+                            print("[INFO] Session established")
+                        # Log system prompt tokens (estimate ~500 tokens for our minimal prompt)
+                        self.cost_tracker.log_realtime_audio(
+                            text_input_tokens=500,
+                            event_type="session_init",
+                            notes="System prompt"
+                        )
                         continue
                     
                     if event.type == "session.updated":
-                        print("⚙️  Session configured")
                         print("\n" + "="*50)
-                        print("🎤 READY! Start speaking into your microphone...")
-                        print("="*50 + "\n")
+                        print("READY - Start speaking into your microphone")
                         print("="*50 + "\n")
                         continue
                     
@@ -282,20 +399,88 @@ class RealtimeVoiceAgent:
                         try:
                             item_id = getattr(event, 'item_id', 'default')
                             if item_id in acc_items:
-                                print(f"🤖 AI: {acc_items[item_id]}")
-                        except:
+                                ai_response = acc_items[item_id]
+                                print(f"Assistant: {ai_response}")
+                                
+                                # Log cost for this turn
+                                # Estimate: ~150 chars/sec speech, so chars/150 = seconds
+                                audio_out_seconds = len(ai_response) / 15  # ~15 chars per second for speech
+                                audio_in_seconds = 3  # Estimate user spoke ~3 seconds
+                                
+                                self.cost_tracker.log_realtime_audio(
+                                    audio_input_seconds=audio_in_seconds,
+                                    audio_output_seconds=audio_out_seconds,
+                                    text_output_tokens=len(ai_response) // 4,  # ~4 chars per token
+                                    event_type="conversation_turn",
+                                    notes=ai_response[:50] + "..." if len(ai_response) > 50 else ai_response
+                                )
+                                
+                                # Print running cost
+                                self.cost_tracker.print_live_cost()
+                                
+                                # Track for summarization
+                                self.turn_count += 1
+                                if self.recent_exchanges:
+                                    self.recent_exchanges[-1]['assistant'] = ai_response
+                                
+                                # Check if we need to summarize
+                                if self.turn_count >= self.MAX_TURNS_BEFORE_SUMMARY:
+                                    await self.summarize_conversation()
+                                    
+                        except Exception as e:
                             pass
                         continue
                     
-                    # User's transcribed speech
-                    if event.type == "conversation.item.input_audio_transcription.completed":
-                        if hasattr(event, 'transcript') and event.transcript:
-                            print(f"\n👤 You said: \"{event.transcript}\"")
+                    # Response completed - good place to check history size
+                    if event.type == "response.done":
+                        # Truncate if conversation is getting too long
+                        await self.truncate_old_items()
                         continue
                     
-                    # Input audio buffer events
+                    # User speech detected (no transcript since we disabled Whisper)
                     if event.type == "input_audio_buffer.speech_stopped":
-                        print("⏳ [Processing...]", end="\r")
+                        # Track that user said something (we don't have text without Whisper)
+                        self.recent_exchanges.append({'user': '[audio]', 'assistant': ''})
+                        # Start timing for this turn
+                        self.turn_start_time = time.time()
+                        print("[Processing...]", end="\r")
+                        continue
+                    
+                    # ===== TOOL/FUNCTION CALLING =====
+                    # When the model wants to call a tool, handle it and send result back
+                    if event.type == "response.function_call_arguments.done":
+                        try:
+                            tool_name = event.name
+                            call_id = event.call_id
+                            arguments = json.loads(event.arguments) if event.arguments else {}
+                            
+                            if self.verbose:
+                                print(f"[TOOL] {tool_name}({arguments})")
+                            
+                            # Execute the tool
+                            result = handle_tool_call(tool_name, arguments)
+                            
+                            # Log tool call (no direct cost, but track usage)
+                            self.cost_tracker.log_tool_call(
+                                tool_name=tool_name,
+                                output_tokens=len(result) // 4  # Tool output becomes input tokens
+                            )
+                            
+                            # Send result back to the model
+                            await conn.conversation.item.create(
+                                item={
+                                    "type": "function_call_output",
+                                    "call_id": call_id,
+                                    "output": result
+                                }
+                            )
+                            
+                            # Trigger model to continue with the tool result
+                            await conn.response.create()
+                            
+                        except Exception as e:
+                            if self.verbose:
+                                print(f"[ERROR] Tool error: {e}")
                         continue
                     
                     # Error handling
@@ -303,27 +488,28 @@ class RealtimeVoiceAgent:
                         error_msg = str(getattr(event, 'error', event))
                         # Suppress cancel errors (normal during interruptions)
                         if 'response_cancel_not_active' not in error_msg:
-                            print(f"\n❌ API Error: {error_msg}")
+                            print(f"\n[ERROR] API: {error_msg}")
                         continue
                         
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            print(f"\n❌ Connection error: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"\n[ERROR] Connection error: {e}")
+            if self.verbose:
+                import traceback
+                traceback.print_exc()
     
     async def run_async(self):
         """Main async entry point"""
         print(f"\n{'='*60}")
-        print(f"🏥 Welcome to {HOSPITAL_NAME} Voice Assistant")
+        print(f"  {HOSPITAL_NAME.upper()} VOICE ASSISTANT")
         print(f"{'='*60}")
-        print("\n🎤 Speak into your microphone to ask questions about:")
-        print("   • Doctors and their availability")
-        print("   • Department information") 
-        print("   • Hospital facilities and timings")
-        print("   • Which specialist to consult for your symptoms")
-        print("\n⏹️  Press Ctrl+C to stop the conversation")
+        print("\nSpeak into your microphone to ask about:")
+        print("   - Doctors and availability")
+        print("   - Department information") 
+        print("   - Hospital facilities and timings")
+        print("   - Which specialist for your symptoms")
+        print("\nPress Ctrl+C to stop")
         print(f"{'='*60}\n")
         
         self.audio_player.start()
@@ -340,14 +526,18 @@ class RealtimeVoiceAgent:
             pass
         finally:
             self.audio_player.stop()
-            print("\n🔴 Voice agent stopped.")
+            # End cost tracking session and print summary
+            self.cost_tracker.end_session()
+            print("\nVoice agent stopped.")
     
     def run(self):
         """Synchronous entry point - runs the async event loop"""
         try:
             asyncio.run(self.run_async())
         except KeyboardInterrupt:
-            print("\n\n👋 Goodbye! Thank you for using our voice assistant.")
+            # Still end the session on keyboard interrupt
+            self.cost_tracker.end_session()
+            print("\n\nGoodbye! Thank you for using our voice assistant.")
 
 
 class VoiceAgent:
@@ -356,8 +546,8 @@ class VoiceAgent:
     Wraps the RealtimeVoiceAgent.
     """
     
-    def __init__(self, speech_recognition=None, text_to_speech=None, query_handler=None):
-        self.realtime_agent = RealtimeVoiceAgent()
+    def __init__(self, verbose: bool = False, speech_recognition=None, text_to_speech=None, query_handler=None):
+        self.realtime_agent = RealtimeVoiceAgent(verbose=verbose)
         self.speech_recognition = speech_recognition
         self.text_to_speech = text_to_speech
         self.query_handler = query_handler
@@ -376,9 +566,6 @@ class VoiceAgent:
 
 
 # Allow running directly
-if __name__ == "__main__":
-    agent = RealtimeVoiceAgent()
-    agent.run()# Allow running directly
 if __name__ == "__main__":
     agent = RealtimeVoiceAgent()
     agent.run()

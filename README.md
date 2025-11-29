@@ -1,26 +1,27 @@
-# 🏥 Hospital Voice Agent
+# Hospital Voice Agent
 
-A real-time AI voice assistant for hospital patient inquiries, powered by OpenAI's Realtime API.
+A real-time AI voice assistant for hospital patient inquiries using OpenAI's Realtime API. The agent handles live voice conversations in Hinglish (Hindi-English), providing information about doctors, departments, facilities, and symptom-based recommendations.
 
-## ✨ Features
+## Features
 
-- **Live Voice Conversation**: Full-duplex audio - speak naturally and get instant responses
-- **Real-time Speech-to-Speech**: Uses OpenAI's GPT-4o Realtime API for low-latency conversation
-- **Hospital Information**: Provides details about doctors, departments, facilities, and timings
-- **Symptom Guidance**: Helps patients identify which specialist to consult
-- **Natural Interaction**: Conversational AI that understands context and follow-up questions
+- **Real-time Voice Conversation** - Full-duplex audio using OpenAI's GPT-4o Realtime API
+- **Natural Language Understanding** - Understands Hindi, English, and Hinglish
+- **Smart Symptom Routing** - AI recommends the best department based on patient symptoms
+- **Function Calling** - Uses tools to fetch hospital data on-demand (reduces costs)
+- **Conversation Summarization** - Compresses history using GPT-4o-mini to manage token usage
+- **Cost Tracking** - Logs all API usage with detailed cost breakdown
+- **Interrupt Support** - Users can interrupt the AI mid-response (barge-in)
 
-## 🚀 Quick Start
-
-### Prerequisites
+## Requirements
 
 - Python 3.9+
 - OpenAI API key with Realtime API access
 - Microphone and speakers
+- Windows, macOS, or Linux
 
-### Installation
+## Installation
 
-1. **Navigate to the project directory:**
+1. **Clone or navigate to the project:**
    ```bash
    cd hospital-voice-agent
    ```
@@ -30,108 +31,127 @@ A real-time AI voice assistant for hospital patient inquiries, powered by OpenAI
    pip install -r requirements.txt
    ```
 
-3. **Configure your API key:**
+3. **Configure API key:**
    
-   The `.env` file is already configured. If you need to update it:
-   ```bash
-   # Edit .env file
+   Create a `.env` file in the project root:
+   ```
    OPENAI_API_KEY=your_api_key_here
    ```
 
-4. **Run the voice agent:**
+4. **Run the agent:**
    ```bash
    cd src
    python main.py
    ```
 
-## 🎤 How to Use
+## Usage
 
-1. Run the script and wait for "Listening..." message
-2. Speak naturally into your microphone
-3. Ask questions like:
-   - "I have knee pain, which doctor should I see?"
-   - "What are Dr. Sarah Johnson's timings?"
-   - "What facilities does the hospital have?"
-   - "I need to see a heart specialist"
-   - "What are the consultation fees?"
-4. Press `Ctrl+C` to stop
+### Basic Mode
+```bash
+python main.py
+```
+Runs with minimal console output. Cost tracking happens in background.
 
-## 📁 Project Structure
+### Verbose Mode
+```bash
+python main.py --verbose
+```
+Shows detailed output including:
+- Audio device information
+- Tool calls and their results
+- Real-time cost tracking
+- Session summary with per-model breakdown
+
+### During Conversation
+- Speak naturally into your microphone
+- Interrupt the AI at any time by speaking
+- Press `Ctrl+C` to stop
+
+### Example Questions
+- "I have knee pain, which doctor should I see?"
+- "What are the hospital timings?"
+- "Tell me about Dr. Anil Sharma"
+- "Kya facilities hain hospital mein?"
+- "I was advised surgery, should I get a second opinion?"
+
+## Project Structure
 
 ```
 hospital-voice-agent/
 ├── src/
-│   ├── main.py                 # Entry point - run this!
+│   ├── main.py                 # Entry point
 │   ├── agent/
-│   │   └── voice_agent.py      # Core realtime voice agent
+│   │   ├── voice_agent.py      # Core realtime voice agent
+│   │   └── tools.py            # Function definitions for API
 │   ├── config/
-│   │   └── settings.py         # Configuration & hospital data
-│   ├── handlers/
-│   │   ├── patient_queries.py  # Symptom to department mapping
-│   │   ├── general_info.py     # Hospital information
-│   │   └── appointment_handler.py
-│   ├── services/
-│   │   ├── llm_service.py
-│   │   └── patient_data_service.py
+│   │   ├── settings.py         # Configuration & system prompt
+│   │   └── hospital_data.py    # Hospital information & data functions
 │   └── utils/
-│       └── audio_utils.py
+│       ├── audio_utils.py      # Audio helpers
+│       └── cost_tracker.py     # Usage logging & cost calculation
+├── logs/                       # Session logs (JSON)
 ├── tests/
 ├── requirements.txt
-├── .env                        # Your API key (do not commit!)
-└── README.md
+├── pyproject.toml
+└── .env                        # API key (not committed)
 ```
 
-## 🏥 Demo Hospital Data
+## Configuration
 
-The agent is configured with demo data for "City General Hospital":
+### System Prompt
+Edit `src/config/settings.py` to customize the AI's personality and behavior.
 
-### Departments & Doctors
+### Hospital Data
+Edit `src/config/hospital_data.py` to update:
+- Hospital information (address, phones, hours)
+- Doctors and departments
+- Facilities list
+- Second opinion service details
 
-| Department | Doctors | Hours | Fee |
-|------------|---------|-------|-----|
-| Orthopedics | Dr. Sarah Johnson | Mon, Wed, Fri: 9-5 | $150 |
-| Orthopedics | Dr. Michael Chen | Tue, Thu: 10-6 | $175 |
-| Cardiology | Dr. Emily Williams | Mon-Fri: 9-4 | $200 |
-| Cardiology | Dr. Robert Kumar | Mon, Wed, Fri: 11-7 | $250 |
-| General Medicine | Dr. Lisa Anderson | Mon-Sat: 8-2 | $100 |
-| Dermatology | Dr. Priya Sharma | Tue, Thu, Sat: 10-5 | $130 |
-| Pediatrics | Dr. Amanda Brown | Mon-Fri: 9-5 | $120 |
-| ENT | Dr. David Lee | Mon, Wed, Fri: 10-4 | $140 |
+### Cost Tracking
+Logs are saved to `logs/` directory:
+- `session_YYYYMMDD_HHMMSS.json` - Per-session detailed logs
+- `usage_summary.json` - Aggregate usage across all sessions
 
-### Facilities
-- 24/7 Emergency Room
-- Advanced Diagnostic Lab
-- Digital X-Ray & MRI
-- 24-hour Pharmacy
-- Ambulance Service
-- ICU (20 beds)
-- Private & Semi-private rooms
+## Tools (Function Calling)
 
-## ⚙️ Configuration
+The agent uses 7 tools to fetch data on-demand:
 
-Edit `src/config/settings.py` to customize:
-- Hospital information
-- Department and doctor data
-- System instructions for the AI
-- Audio settings
+| Tool | Description |
+|------|-------------|
+| `get_hospital_info` | Address, phone, hours |
+| `get_facilities` | List of hospital services |
+| `get_all_doctors` | Summary of all doctors |
+| `get_doctor_details` | Specific doctor information |
+| `get_department_info` | Department details |
+| `get_specialties` | All departments for symptom routing |
+| `get_second_opinion_info` | Free second opinion service |
 
-## 🔧 Troubleshooting
+## Cost Optimization
 
-**No audio input detected:**
-- Check microphone permissions
-- Ensure microphone is set as default input device
+This implementation includes several cost-saving measures:
+
+1. **Minimal System Prompt** - ~320 tokens instead of embedding all data
+2. **On-demand Data Fetching** - Tools fetch only what's needed
+3. **Conversation Summarization** - Compresses history after 4 turns using GPT-4o-mini
+4. **No Whisper Transcription** - Uses Realtime API's built-in speech recognition
+
+Estimated cost: ~$0.25-0.35 per 3-minute conversation
+
+## Troubleshooting
+
+**No audio input:**
+- Check microphone permissions in system settings
+- Verify microphone is set as default input device
 
 **API errors:**
-- Verify your OpenAI API key is correct
-- Ensure you have access to the Realtime API
+- Ensure your API key has Realtime API access
+- Check your OpenAI account has sufficient credits
 
 **Audio playback issues:**
-- Check speaker/headphone connection
-- Ensure audio output device is configured
-
-## 📝 License
-
-MIT License
+- Verify speakers/headphones are connected
+- Check audio output device in system settings
 
 ## License
-This project is licensed under the MIT License. See the LICENSE file for details.
+
+MIT License
