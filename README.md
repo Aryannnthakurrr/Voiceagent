@@ -17,7 +17,8 @@ A real-time AI voice assistant for hospital patient inquiries using OpenAI's Rea
 - Python 3.9+
 - OpenAI API key with Realtime API access
 - Microphone and speakers
-- Windows, macOS, or Linux
+- **Windows recommended** (best audio experience with built-in echo cancellation)
+- macOS/Linux supported but may experience echo issues without headphones
 
 ## Installation
 
@@ -88,7 +89,8 @@ hospital-voice-agent/
 │   │   └── hospital_data.py    # Hospital information & data functions
 │   └── utils/
 │       ├── audio_utils.py      # Audio helpers
-│       └── cost_tracker.py     # Usage logging & cost calculation
+│       ├── cost_tracker.py     # Usage logging & cost calculation
+│       └── echo_canceller.py   # Software echo cancellation (Mac)
 ├── logs/                       # Session logs (JSON)
 ├── tests/
 ├── requirements.txt
@@ -138,7 +140,25 @@ This implementation includes several cost-saving measures:
 
 Estimated cost: ~$0.25-0.35 per 3-minute conversation
 
+## Platform Notes
+
+### Windows
+- Works best with built-in acoustic echo cancellation
+- Supports full barge-in without headphones
+- Recommended for production use
+
+### macOS/Linux
+- **Use headphones** to prevent echo feedback
+- Without headphones, the AI may hear its own audio and restart responses
+- Barge-in works but may be less reliable due to echo detection
+- Echo cancellation implemented but not as effective as Windows native AEC
+
 ## Troubleshooting
+
+**Repeated/stuttering responses (Mac):**
+- Use headphones to eliminate echo feedback
+- Lower speaker volume if not using headphones
+- Speak clearly and slightly louder (high VAD threshold on Mac)
 
 **No audio input:**
 - Check microphone permissions in system settings
